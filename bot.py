@@ -2,7 +2,7 @@ import logging
 import asyncio
 import re
 import os
-import google.generativeai as genai
+from google import genai
 from telegram import Update
 from telegram.ext import (
     ApplicationBuilder, MessageHandler, filters,
@@ -25,51 +25,52 @@ logging.basicConfig(
 )
 logger = logging.getLogger("AlphaModeratorBot")
 
-genai.configure(api_key=GEMINI_API_KEY)
-gemini = genai.GenerativeModel("gemini-1.5-flash-latest")
+client = genai.Client(api_key=GEMINI_API_KEY)
+MODEL = "gemini-2.0-flash"
+
+
+async def gemini_ask(prompt: str) -> str:
+    try:
+        response = await asyncio.to_thread(
+            client.models.generate_content,
+            model=MODEL,
+            contents=prompt
+        )
+        return response.text.strip()
+    except Exception as e:
+        logger.error(f"Gemini xato: {e}")
+        return None
 
 
 async def ai_is_profanity(text: str) -> bool:
-    try:
-        prompt = (
-            "Quyidagi xabar haqorat, so'kinish yoki kimnidir kamsitishni o'z ichiga oladimi?\n"
-            "Faqat 'ha' yoki 'yoq' deb javob ber, boshqa hech narsa yozma.\n\n"
-            f"Xabar: {text}"
-        )
-        response = await asyncio.to_thread(gemini.generate_content, prompt)
-        return response.text.strip().lower().startswith("ha")
-    except Exception as e:
-        logger.error(f"AI profanity xato: {e}")
-        return False
+    prompt = (
+        "Quyidagi xabar haqorat, so'kinish yoki kimnidir kamsitishni o'z ichiga oladimi?\n"
+        "Faqat 'ha' yoki 'yoq' deb javob ber, boshqa hech narsa yozma.\n\n"
+        f"Xabar: {text}"
+    )
+    result = await gemini_ask(prompt)
+    return result is not None and result.lower().startswith("ha")
 
 
 async def ai_is_ad(text: str) -> bool:
-    try:
-        prompt = (
-            "Quyidagi xabar reklama, spam, mahsulot/xizmat taklifi yoki boshqa kanalga taklif o'z ichiga oladimi?\n"
-            "Faqat 'ha' yoki 'yoq' deb javob ber, boshqa hech narsa yozma.\n\n"
-            f"Xabar: {text}"
-        )
-        response = await asyncio.to_thread(gemini.generate_content, prompt)
-        return response.text.strip().lower().startswith("ha")
-    except Exception as e:
-        logger.error(f"AI ad xato: {e}")
-        return False
+    prompt = (
+        "Quyidagi xabar reklama, spam, mahsulot/xizmat taklifi yoki boshqa kanalga taklif o'z ichiga oladimi?\n"
+        "Faqat 'ha' yoki 'yoq' deb javob ber, boshqa hech narsa yozma.\n\n"
+        f"Xabar: {text}"
+    )
+    result = await gemini_ask(prompt)
+    return result is not None and result.lower().startswith("ha")
 
 
 async def ask_gemini(question: str) -> str:
-    try:
-        prompt = (
-            "Sen 'Alpha' ismli aqlli guruh assistentisan. "
-            "O'zbek tilida qisqa, aniq va foydali javob ber. "
-            "Markdown ishlatma, oddiy matn yoz.\n\n"
-            f"Savol: {question}"
-        )
-        response = await asyncio.to_thread(gemini.generate_content, prompt)
-        return response.text.strip()
-    except Exception as e:
-        logger.error(f"Gemini javob xato: {e}")
-        return "Hozir javob bera olmayapman, keyinroq urinib ko'ring."
+    prompt = (
+        "Sen 'Alpha' ismli aqlli guruh assistentisan. "
+        "O'zbek tilida qisqa, aniq va foydali javob ber. "
+        "Markdown ishlatma, oddiy matn yoz.\n\n"
+        f"Savol: {question}"
+    )
+    result = await gemini_ask(prompt)
+    return result or "Hozir javob bera olmayapman, keyinroq urinib ko'ring."
 
 
 def contains_ad_link(text: str, message) -> bool:
