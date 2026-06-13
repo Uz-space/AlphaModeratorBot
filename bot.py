@@ -26,7 +26,7 @@ logging.basicConfig(
 logger = logging.getLogger("AlphaModeratorBot")
 
 genai.configure(api_key=GEMINI_API_KEY)
-gemini = genai.GenerativeModel("gemini-2.0-flash")
+gemini = genai.GenerativeModel("gemini-1.5-flash")
 
 
 async def ai_is_profanity(text: str) -> bool:
