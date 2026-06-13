@@ -24,7 +24,6 @@ gemini = genai.GenerativeModel("gemini-2.0-flash")
 # ─────────────────────────────────────────────
 
 async def ai_is_profanity(text: str) -> bool:
-    """Gemini so'kinish/haqoratni aniqlaydi."""
     try:
         prompt = (
             "Quyidagi xabar haqorat, so'kinish yoki kimnidir kamsitishni o'z ichiga oladimi?\n"
@@ -32,15 +31,13 @@ async def ai_is_profanity(text: str) -> bool:
             f"Xabar: {text}"
         )
         response = await asyncio.to_thread(gemini.generate_content, prompt)
-        answer = response.text.strip().lower()
-        return answer.startswith("ha")
+        return response.text.strip().lower().startswith("ha")
     except Exception as e:
-        logger.error(f"AI profanity check xato: {e}")
+        logger.error(f"AI profanity xato: {e}")
         return False
 
 
 async def ai_is_ad(text: str) -> bool:
-    """Gemini reklamani aniqlaydi."""
     try:
         prompt = (
             "Quyidagi xabar reklama, spam, mahsulot/xizmat taklifi yoki boshqa kanalga taklif o'z ichiga oladimi?\n"
@@ -48,15 +45,13 @@ async def ai_is_ad(text: str) -> bool:
             f"Xabar: {text}"
         )
         response = await asyncio.to_thread(gemini.generate_content, prompt)
-        answer = response.text.strip().lower()
-        return answer.startswith("ha")
+        return response.text.strip().lower().startswith("ha")
     except Exception as e:
-        logger.error(f"AI ad check xato: {e}")
+        logger.error(f"AI ad xato: {e}")
         return False
 
 
 async def ask_gemini(question: str) -> str:
-    """Alpha wake word uchun AI javobi."""
     try:
         prompt = (
             "Sen 'Alpha' ismli aqlli guruh assistentisan. "
@@ -68,11 +63,10 @@ async def ask_gemini(question: str) -> str:
         return response.text.strip()
     except Exception as e:
         logger.error(f"Gemini javob xato: {e}")
-        return "⚠️ Hozir javob bera olmayapman."
+        return "Hozir javob bera olmayapman, keyinroq urinib ko'ring."
 
 
 def contains_ad_link(text: str, message) -> bool:
-    """Tez link/forward tekshiruvi (AI dan oldin)."""
     if message.forward_from_chat:
         return True
     for pattern in AD_PATTERNS:
@@ -85,14 +79,14 @@ def is_wake_word(text: str) -> bool:
     return bool(re.search(r'\balpha\b', text, re.IGNORECASE))
 
 
-async def send_and_delete(context, chat_id, text, delay=1):
-    """Xabar yuboradi va delay soniyadan keyin o'chiradi."""
+async def warn_and_delete(context, chat_id, text):
+    """Ogohlantirish yuboradi va 1 soniyadan keyin o'chiradi."""
     try:
         sent = await context.bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML")
-        await asyncio.sleep(delay)
+        await asyncio.sleep(1)
         await context.bot.delete_message(chat_id=chat_id, message_id=sent.message_id)
     except Exception as e:
-        logger.warning(f"send_and_delete xato: {e}")
+        logger.warning(f"warn_and_delete xato: {e}")
 
 
 # ─────────────────────────────────────────────
@@ -121,24 +115,34 @@ async def moderate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = message.from_user
     user_mention = f"<a href='tg://user?id={user.id}'>{user.first_name}</a>"
 
-    # ── Wake word "alpha" — adminlar ham ishlatadi ──
+    # ── Wake word "alpha" — hamma ishlatishi mumkin ──
     if is_wake_word(text):
         question = re.sub(r'\balpha\b', '', text, flags=re.IGNORECASE).strip(" ?,!:")
         if not question:
             question = "O'zingni tanit va nima qila olishingni ayt"
 
-        await context.bot.send_chat_action(chat_id=chat_id, action="typing")
+        # Typing ko'rinishi — javob kelguncha davom etadi
+        async def keep_typing():
+            for _ in range(15):
+                try:
+                    await context.bot.send_chat_action(chat_id=chat_id, action="typing")
+                except Exception:
+                    break
+                await asyncio.sleep(4)
+
+        typing_task = asyncio.create_task(keep_typing())
         answer = await ask_gemini(question)
+        typing_task.cancel()
+
+        # Alpha javobi O'CHIRILMAYDI — qolib turadi
         try:
-            sent = await context.bot.send_message(
+            await context.bot.send_message(
                 chat_id=chat_id,
                 text=f"🤖 <b>Alpha:</b>\n{answer}",
                 parse_mode="HTML"
             )
-            await asyncio.sleep(1)
-            await context.bot.delete_message(chat_id=chat_id, message_id=sent.message_id)
         except Exception as e:
-            logger.warning(f"Alpha javob o'chirishda xato: {e}")
+            logger.warning(f"Alpha javob yuborishda xato: {e}")
         return
 
     # Adminlarni moderatsiyadan o'tkazma
@@ -154,18 +158,17 @@ async def moderate(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.delete_message(chat_id=chat_id, message_id=msg_id)
         except Exception:
             pass
-        asyncio.create_task(send_and_delete(
+        asyncio.create_task(warn_and_delete(
             context, chat_id,
-            f"🚫 {user_mention} — <b>Reklama aniqlandi!</b> Xabar o'chirildi.",
-            delay=1
+            f"🚫 {user_mention} — <b>Reklama aniqlandi!</b> Xabar o'chirildi."
         ))
         return
 
-    # ── 2. AI paralel tekshiruvi (so'kinish + reklama) ──
-    prof_task = asyncio.create_task(ai_is_profanity(text))
-    ad_task = asyncio.create_task(ai_is_ad(text))
-
-    is_prof, is_ad = await asyncio.gather(prof_task, ad_task)
+    # ── 2. AI paralel tekshiruvi ──
+    is_prof, is_ad = await asyncio.gather(
+        ai_is_profanity(text),
+        ai_is_ad(text)
+    )
 
     if is_prof:
         try:
@@ -174,10 +177,10 @@ async def moderate(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logger.info(f"🚫 Ban: {user.id}")
         except Exception as e:
             logger.warning(f"Ban/delete xato: {e}")
-        asyncio.create_task(send_and_delete(
+        # Ogohlantirish 1 sek da o'chadi
+        asyncio.create_task(warn_and_delete(
             context, chat_id,
-            f"⛔️ {user_mention} — <b>Haqorat aniqlandi!</b> Ban qilindi.",
-            delay=1
+            f"⛔️ {user_mention} — <b>Haqorat aniqlandi!</b> Ban qilindi."
         ))
         return
 
@@ -186,10 +189,9 @@ async def moderate(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.delete_message(chat_id=chat_id, message_id=msg_id)
         except Exception:
             pass
-        asyncio.create_task(send_and_delete(
+        asyncio.create_task(warn_and_delete(
             context, chat_id,
-            f"🚫 {user_mention} — <b>Reklama aniqlandi!</b> Xabar o'chirildi.",
-            delay=1
+            f"🚫 {user_mention} — <b>Reklama aniqlandi!</b> Xabar o'chirildi."
         ))
         return
 
@@ -202,10 +204,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🤖 <b>AlphaModeratorBot ishga tayyor!</b>\n\n"
         "🛡️ <b>AI Moderatsiya:</b>\n"
-        "• Haqorat → AI aniqlaydi → o'chirish + ban\n"
-        "• Reklama → AI aniqlaydi → o'chirish\n\n"
+        "• Haqorat → AI aniqlaydi → o'chirish + ban (ogohlantirish 1 sek da o'chadi)\n"
+        "• Reklama → AI aniqlaydi → o'chirish (ogohlantirish 1 sek da o'chadi)\n\n"
         "🧠 <b>AI Assistant:</b>\n"
-        "• <b>alpha</b> + savol → AI javob beradi (1 sek da o'chadi)\n"
+        "• <b>alpha</b> + savol yozing → AI javob beradi\n"
         "• Misol: <i>alpha Python nima?</i>",
         parse_mode="HTML"
     )
