@@ -2,8 +2,8 @@
 #  AlphaModeratorBot — Konfiguratsiya
 # ═══════════════════════════════════════════════
 
-BOT_TOKEN = "YOUR_BOT_TOKEN_HERE"
-GEMINI_API_KEY = "YOUR_GEMINI_API_KEY_HERE"
+BOT_TOKEN = "8205611933:AAEVUfbVUo65DVoHwsao9z8ZKnBvj_GeYZg"
+GEMINI_API_KEY = "AQ.Ab8RN6IW0EGCinr4LLdW4-tf6TpNCmWdAxpjzS7h5Ce_zCh-Rw"
 
 # ─────────────────────────────────────────────
 #  Tez link/forward tekshiruvi (AI dan oldin)
