@@ -2,7 +2,7 @@ import logging
 import asyncio
 import re
 import os
-from google import genai
+from groq import Groq
 from telegram import Update
 from telegram.ext import (
     ApplicationBuilder, MessageHandler, filters,
@@ -10,7 +10,7 @@ from telegram.ext import (
 )
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
 AD_PATTERNS = [
     r'https?://[^\s]+',
@@ -25,20 +25,22 @@ logging.basicConfig(
 )
 logger = logging.getLogger("AlphaModeratorBot")
 
-client = genai.Client(api_key=GEMINI_API_KEY)
-MODEL = "gemini-2.0-flash-lite"
+groq_client = Groq(api_key=GROQ_API_KEY)
+MODEL = "llama-3.3-70b-versatile"
 
 
-async def gemini_ask(prompt: str) -> str:
+async def groq_ask(prompt: str) -> str | None:
     try:
         response = await asyncio.to_thread(
-            client.models.generate_content,
+            groq_client.chat.completions.create,
             model=MODEL,
-            contents=prompt
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=512,
+            temperature=0.3,
         )
-        return response.text.strip()
+        return response.choices[0].message.content.strip()
     except Exception as e:
-        logger.error(f"Gemini xato: {e}")
+        logger.error(f"Groq xato: {e}")
         return None
 
 
@@ -48,7 +50,7 @@ async def ai_is_profanity(text: str) -> bool:
         "Faqat 'ha' yoki 'yoq' deb javob ber, boshqa hech narsa yozma.\n\n"
         f"Xabar: {text}"
     )
-    result = await gemini_ask(prompt)
+    result = await groq_ask(prompt)
     return result is not None and result.lower().startswith("ha")
 
 
@@ -58,18 +60,18 @@ async def ai_is_ad(text: str) -> bool:
         "Faqat 'ha' yoki 'yoq' deb javob ber, boshqa hech narsa yozma.\n\n"
         f"Xabar: {text}"
     )
-    result = await gemini_ask(prompt)
+    result = await groq_ask(prompt)
     return result is not None and result.lower().startswith("ha")
 
 
-async def ask_gemini(question: str) -> str:
+async def ask_ai(question: str) -> str:
     prompt = (
         "Sen 'Alpha' ismli aqlli guruh assistentisan. "
         "O'zbek tilida qisqa, aniq va foydali javob ber. "
         "Markdown ishlatma, oddiy matn yoz.\n\n"
         f"Savol: {question}"
     )
-    result = await gemini_ask(prompt)
+    result = await groq_ask(prompt)
     return result or "Hozir javob bera olmayapman, keyinroq urinib ko'ring."
 
 
@@ -117,6 +119,7 @@ async def moderate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = message.from_user
     user_mention = f"<a href='tg://user?id={user.id}'>{user.first_name}</a>"
 
+    # Wake word "alpha"
     if is_wake_word(text):
         question = re.sub(r'\balpha\b', '', text, flags=re.IGNORECASE).strip(" ?,!:")
         if not question:
@@ -131,7 +134,7 @@ async def moderate(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await asyncio.sleep(4)
 
         typing_task = asyncio.create_task(keep_typing())
-        answer = await ask_gemini(question)
+        answer = await ask_ai(question)
         typing_task.cancel()
 
         try:
@@ -150,6 +153,7 @@ async def moderate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not text:
         return
 
+    # Tez link tekshiruvi
     if contains_ad_link(text, message):
         try:
             await context.bot.delete_message(chat_id=chat_id, message_id=msg_id)
@@ -161,6 +165,7 @@ async def moderate(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ))
         return
 
+    # AI paralel tekshiruvi
     is_prof, is_ad = await asyncio.gather(
         ai_is_profanity(text),
         ai_is_ad(text)
