@@ -1,13 +1,23 @@
 import logging
 import asyncio
 import re
+import os
 import google.generativeai as genai
 from telegram import Update
 from telegram.ext import (
     ApplicationBuilder, MessageHandler, filters,
     ContextTypes, CommandHandler
 )
-from config import BOT_TOKEN, GEMINI_API_KEY, AD_PATTERNS
+
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+
+AD_PATTERNS = [
+    r'https?://[^\s]+',
+    r't\.me/[^\s]+',
+    r'(\+998|998)\s*[\d\s\-]{9,}',
+    r'\b(click\.uz|payme|uzcard|humo)\b',
+]
 
 logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(message)s",
@@ -18,10 +28,6 @@ logger = logging.getLogger("AlphaModeratorBot")
 genai.configure(api_key=GEMINI_API_KEY)
 gemini = genai.GenerativeModel("gemini-2.0-flash")
 
-
-# ─────────────────────────────────────────────
-#  AI tekshiruvlari
-# ─────────────────────────────────────────────
 
 async def ai_is_profanity(text: str) -> bool:
     try:
@@ -80,7 +86,6 @@ def is_wake_word(text: str) -> bool:
 
 
 async def warn_and_delete(context, chat_id, text):
-    """Ogohlantirish yuboradi va 1 soniyadan keyin o'chiradi."""
     try:
         sent = await context.bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML")
         await asyncio.sleep(1)
@@ -88,10 +93,6 @@ async def warn_and_delete(context, chat_id, text):
     except Exception as e:
         logger.warning(f"warn_and_delete xato: {e}")
 
-
-# ─────────────────────────────────────────────
-#  Main handler
-# ─────────────────────────────────────────────
 
 async def moderate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message or update.edited_message
@@ -115,13 +116,11 @@ async def moderate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = message.from_user
     user_mention = f"<a href='tg://user?id={user.id}'>{user.first_name}</a>"
 
-    # ── Wake word "alpha" — hamma ishlatishi mumkin ──
     if is_wake_word(text):
         question = re.sub(r'\balpha\b', '', text, flags=re.IGNORECASE).strip(" ?,!:")
         if not question:
             question = "O'zingni tanit va nima qila olishingni ayt"
 
-        # Typing ko'rinishi — javob kelguncha davom etadi
         async def keep_typing():
             for _ in range(15):
                 try:
@@ -134,7 +133,6 @@ async def moderate(update: Update, context: ContextTypes.DEFAULT_TYPE):
         answer = await ask_gemini(question)
         typing_task.cancel()
 
-        # Alpha javobi O'CHIRILMAYDI — qolib turadi
         try:
             await context.bot.send_message(
                 chat_id=chat_id,
@@ -145,14 +143,12 @@ async def moderate(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logger.warning(f"Alpha javob yuborishda xato: {e}")
         return
 
-    # Adminlarni moderatsiyadan o'tkazma
     if is_admin:
         return
 
     if not text:
         return
 
-    # ── 1. Tez link/forward tekshiruvi ──
     if contains_ad_link(text, message):
         try:
             await context.bot.delete_message(chat_id=chat_id, message_id=msg_id)
@@ -164,7 +160,6 @@ async def moderate(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ))
         return
 
-    # ── 2. AI paralel tekshiruvi ──
     is_prof, is_ad = await asyncio.gather(
         ai_is_profanity(text),
         ai_is_ad(text)
@@ -174,10 +169,8 @@ async def moderate(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             await context.bot.delete_message(chat_id=chat_id, message_id=msg_id)
             await context.bot.ban_chat_member(chat_id=chat_id, user_id=user.id)
-            logger.info(f"🚫 Ban: {user.id}")
         except Exception as e:
             logger.warning(f"Ban/delete xato: {e}")
-        # Ogohlantirish 1 sek da o'chadi
         asyncio.create_task(warn_and_delete(
             context, chat_id,
             f"⛔️ {user_mention} — <b>Haqorat aniqlandi!</b> Ban qilindi."
@@ -196,26 +189,18 @@ async def moderate(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
 
-# ─────────────────────────────────────────────
-#  /start
-# ─────────────────────────────────────────────
-
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🤖 <b>AlphaModeratorBot ishga tayyor!</b>\n\n"
         "🛡️ <b>AI Moderatsiya:</b>\n"
-        "• Haqorat → AI aniqlaydi → o'chirish + ban (ogohlantirish 1 sek da o'chadi)\n"
-        "• Reklama → AI aniqlaydi → o'chirish (ogohlantirish 1 sek da o'chadi)\n\n"
+        "• Haqorat → o'chirish + ban\n"
+        "• Reklama → o'chirish\n\n"
         "🧠 <b>AI Assistant:</b>\n"
-        "• <b>alpha</b> + savol yozing → AI javob beradi\n"
+        "• <b>alpha</b> + savol → AI javob beradi\n"
         "• Misol: <i>alpha Python nima?</i>",
         parse_mode="HTML"
     )
 
-
-# ─────────────────────────────────────────────
-#  Run
-# ─────────────────────────────────────────────
 
 def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
