@@ -26,7 +26,7 @@ logging.basicConfig(
 logger = logging.getLogger("AlphaModeratorBot")
 
 client = genai.Client(api_key=GEMINI_API_KEY)
-MODEL = "gemini-2.0-flash"
+MODEL = "gemini-2.0-flash-lite"
 
 
 async def gemini_ask(prompt: str) -> str:
