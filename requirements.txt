@@ -1,2 +1,2 @@
-python-telegram-bot==21.6
-groq
+python-telegram-bot==22.8
+google-genai==2.8.0
