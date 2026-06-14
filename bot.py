@@ -3,9 +3,8 @@ import logging
 import os
 import re
 from datetime import datetime, timedelta
+from openai import AsyncOpenAI
 
-from google import genai
-from google.genai import types
 from telegram import Update, ChatPermissions
 from telegram.ext import (
     Application,
@@ -23,13 +22,16 @@ logger = logging.getLogger(__name__)
 
 # ===================== SOZLAMALAR =====================
 BOT_TOKEN = os.getenv("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "YOUR_GEMINI_KEY_HERE")
+DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "YOUR_DEEPSEEK_KEY_HERE")
 MUTE_HOURS = 12
 NOTICE_DELETE_SECONDS = 5
 # ======================================================
 
-gemini_client = genai.Client(api_key=GEMINI_API_KEY)
-GEMINI_MODEL = "gemini-2.0-flash"
+deepseek = AsyncOpenAI(
+    api_key=DEEPSEEK_API_KEY,
+    base_url="https://api.deepseek.com",
+)
+DEEPSEEK_MODEL = "deepseek-chat"
 
 SYSTEM_PROMPT = (
     "Siz guruh chatidagi foydali assistentsiz. "
@@ -69,10 +71,9 @@ def is_advertisement(text: str) -> bool:
     matched = sum(1 for kw in AD_KEYWORDS if kw in text_lower)
     return matched >= 2
 
-# -------- UMUMIY MUTE FUNKSIYASI --------
+# -------- MUTE / UNMUTE --------
 
 async def do_mute(context, chat_id: int, user_id: int, hours: int):
-    """Foydalanuvchini mute qiladi."""
     until_date = datetime.now() + timedelta(hours=hours)
     await context.bot.restrict_chat_member(
         chat_id=chat_id,
@@ -87,7 +88,6 @@ async def do_mute(context, chat_id: int, user_id: int, hours: int):
     )
 
 async def do_unmute(context, chat_id: int, user_id: int):
-    """Foydalanuvchini unmute qiladi."""
     await context.bot.restrict_chat_member(
         chat_id=chat_id,
         user_id=user_id,
@@ -100,14 +100,13 @@ async def do_unmute(context, chat_id: int, user_id: int):
         ),
     )
 
-# -------- /mute KOMANDASI (adminlar uchun, reply qilib) --------
+# -------- /mute KOMANDASI --------
 
 async def mute_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.message
     if not message or message.chat.type == "private":
         return
 
-    # Admin tekshiruvi
     try:
         caller = await context.bot.get_chat_member(message.chat.id, message.from_user.id)
         if caller.status not in ("administrator", "creator"):
@@ -117,7 +116,6 @@ async def mute_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         logger.error(f"Admin tekshiruv xatosi: {e}")
         return
 
-    # Reply bo'lishi kerak
     if not message.reply_to_message:
         await message.reply_text("❌ Kimni mute qilish uchun o'sha odamning xabariga reply qiling.")
         return
@@ -125,38 +123,27 @@ async def mute_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     target_user = message.reply_to_message.from_user
     chat_id = message.chat.id
 
-    # Targetni admin bo'lsa o'tkazib yubor
     try:
         target_member = await context.bot.get_chat_member(chat_id, target_user.id)
         if target_member.status in ("administrator", "creator"):
-            await message.reply_text("❌ Admin foydalanuvchini mute qilib bo'lmaydi.")
+            await message.reply_text("❌ Adminni mute qilib bo'lmaydi.")
             return
     except Exception:
         pass
 
-    # Mute qil
     try:
         await do_mute(context, chat_id, target_user.id, MUTE_HOURS)
-        logger.info(f"{target_user.id} admin tomonidan {MUTE_HOURS} soatga mute qilindi.")
     except Exception as e:
         logger.error(f"Mute xatosi: {e}")
         await message.reply_text("❌ Mute qilib bo'lmadi.")
         return
 
-    # Admin /mute xabarini o'chir
     try:
         await message.delete()
-    except Exception:
-        pass
-
-    # Userning barcha ko'rinadigan xabarlarini o'chir
-    # reply qilingan xabarni o'chir
-    try:
         await message.reply_to_message.delete()
     except Exception:
         pass
 
-    # Bildirishnoma yubor va tez o'chir
     mention = f"@{target_user.username}" if target_user.username else target_user.first_name
     try:
         notice = await context.bot.send_message(
@@ -165,13 +152,44 @@ async def mute_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         )
         await asyncio.sleep(2)
         await notice.delete()
+    except Exception:
+        pass
+
+# -------- /unmute KOMANDASI --------
+
+async def unmute_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.message
+    if not message or message.chat.type == "private":
+        return
+
+    try:
+        caller = await context.bot.get_chat_member(message.chat.id, message.from_user.id)
+        if caller.status not in ("administrator", "creator"):
+            await message.reply_text("❌ Faqat adminlar unmute qila oladi.")
+            return
     except Exception as e:
-        logger.warning(f"Bildirishnoma xatosi: {e}")
+        logger.error(f"Admin tekshiruv xatosi: {e}")
+        return
+
+    if not message.reply_to_message:
+        await message.reply_text("❌ Kimni unmute qilish uchun o'sha odamning xabariga reply qiling.")
+        return
+
+    target_user = message.reply_to_message.from_user
+    try:
+        await do_unmute(context, message.chat.id, target_user.id)
+        mention = f"@{target_user.username}" if target_user.username else target_user.first_name
+        notice = await message.reply_text(f"✅ {mention} unmute qilindi.")
+        await asyncio.sleep(3)
+        await notice.delete()
+        await message.delete()
+    except Exception as e:
+        logger.error(f"Unmute xatosi: {e}")
+        await message.reply_text("❌ Unmute qilib bo'lmadi.")
 
 # -------- AVTOMATIK REKLAMA MUTE --------
 
 async def auto_mute_advertiser(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Reklama yozgan odamni avtomatik mute qiladi va xabarini o'chiradi."""
     message = update.message
     if not message:
         return
@@ -217,39 +235,7 @@ async def auto_mute_advertiser(update: Update, context: ContextTypes.DEFAULT_TYP
         except Exception:
             pass
 
-# -------- /unmute KOMANDASI --------
-
-async def unmute_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    message = update.message
-    if not message or message.chat.type == "private":
-        return
-
-    try:
-        caller = await context.bot.get_chat_member(message.chat.id, message.from_user.id)
-        if caller.status not in ("administrator", "creator"):
-            await message.reply_text("❌ Faqat adminlar unmute qila oladi.")
-            return
-    except Exception as e:
-        logger.error(f"Admin tekshiruv xatosi: {e}")
-        return
-
-    if not message.reply_to_message:
-        await message.reply_text("❌ Kimni unmute qilish uchun o'sha odamning xabariga reply qiling.")
-        return
-
-    target_user = message.reply_to_message.from_user
-    try:
-        await do_unmute(context, message.chat.id, target_user.id)
-        mention = f"@{target_user.username}" if target_user.username else target_user.first_name
-        notice = await message.reply_text(f"✅ {mention} unmute qilindi.")
-        await asyncio.sleep(3)
-        await notice.delete()
-        await message.delete()
-    except Exception as e:
-        logger.error(f"Unmute xatosi: {e}")
-        await message.reply_text("❌ Unmute qilib bo'lmadi.")
-
-# -------- AI CHAT --------
+# -------- AI CHAT (DeepSeek, xotirali) --------
 
 chat_histories: dict = {}
 
@@ -259,35 +245,29 @@ async def ai_reply(update: Update, text: str) -> None:
     if chat_id not in chat_histories:
         chat_histories[chat_id] = []
 
-    chat_histories[chat_id].append(
-        types.Content(role="user", parts=[types.Part(text=text)])
-    )
+    chat_histories[chat_id].append({"role": "user", "content": text})
 
     if len(chat_histories[chat_id]) > 20:
         chat_histories[chat_id] = chat_histories[chat_id][-20:]
 
-    try:
-        response = await asyncio.to_thread(
-            gemini_client.models.generate_content,
-            model=GEMINI_MODEL,
-            contents=chat_histories[chat_id],
-            config=types.GenerateContentConfig(
-                system_instruction=SYSTEM_PROMPT,
-                max_output_tokens=1000,
-            ),
-        )
-        reply = response.text.strip()
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}] + chat_histories[chat_id]
 
-        chat_histories[chat_id].append(
-            types.Content(role="model", parts=[types.Part(text=reply)])
+    try:
+        response = await deepseek.chat.completions.create(
+            model=DEEPSEEK_MODEL,
+            messages=messages,
+            max_tokens=1000,
         )
+        reply = response.choices[0].message.content.strip()
+
+        chat_histories[chat_id].append({"role": "assistant", "content": reply})
 
         await update.message.reply_text(reply)
     except Exception as e:
-        logger.error(f"Gemini xatosi: {e}")
+        logger.error(f"DeepSeek xatosi: {e}")
         await update.message.reply_text("Kechirasiz, hozir javob bera olmayapman.")
 
-# -------- GURUH XABARLARI --------
+# -------- HANDLERLAR --------
 
 async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.message
@@ -296,19 +276,15 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
 
     text = message.text
 
-    # Reklama tekshiruvi
     if is_advertisement(text):
         await auto_mute_advertiser(update, context)
         return
 
-    # Bot mention qilinsa AI javob bersin
     bot_username = context.bot.username
     if f"@{bot_username}" in text:
         clean_text = text.replace(f"@{bot_username}", "").strip()
         if clean_text:
             await ai_reply(update, clean_text)
-
-# -------- PRIVATE CHAT --------
 
 async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.message
@@ -316,12 +292,10 @@ async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_T
         return
     await ai_reply(update, message.text.strip())
 
-# -------- START --------
-
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.message.chat.type == "private":
         await update.message.reply_text(
-            "Salom! Men AI assistentman (Gemini 2.0 Flash) 🤖\n"
+            "Salom! Men AI assistentman (DeepSeek) 🤖\n"
             "Istalgan savol yoki mavzu haqida yozing!"
         )
     else:
