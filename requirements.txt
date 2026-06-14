@@ -1,2 +1,1 @@
-python-telegram-bot==22.8
-openai>=1.50.0
+pip install python-telegram-bot==20.7
