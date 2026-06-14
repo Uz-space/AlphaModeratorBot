@@ -4,7 +4,8 @@ import os
 import re
 from datetime import datetime, timedelta
 
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 from telegram import Update, ChatPermissions
 from telegram.ext import (
     Application,
@@ -27,17 +28,16 @@ MUTE_HOURS = 12
 NOTICE_DELETE_SECONDS = 5  # 0 = umuman chiqmasin
 # ======================================================
 
-genai.configure(api_key=GEMINI_API_KEY)
-gemini_model = genai.GenerativeModel(
-    model_name="gemini-1.5-flash",
-    system_instruction=(
-        "Siz guruh chatidagi foydali assistentsiz. "
-        "O'zbek, rus yoki ingliz tilida — savolning tiliga qarab javob bering. "
-        "Qisqa, aniq va do'stona bo'ling."
-    ),
+gemini_client = genai.Client(api_key=GEMINI_API_KEY)
+GEMINI_MODEL = "gemini-2.0-flash"
+
+SYSTEM_PROMPT = (
+    "Siz guruh chatidagi foydali assistentsiz. "
+    "O'zbek, rus yoki ingliz tilida — savolning tiliga qarab javob bering. "
+    "Qisqa, aniq va do'stona bo'ling."
 )
 
-# -------- REKLAMA ANIQLASH (AI siz, faqat regex + kalit so'zlar) --------
+# -------- REKLAMA ANIQLASH --------
 
 AD_PATTERNS = [
     r"https?://[^\s]+",
@@ -70,11 +70,9 @@ def is_advertisement(text: str) -> bool:
         if re.search(pattern, text, re.IGNORECASE):
             return True
     matched = sum(1 for kw in AD_KEYWORDS if kw in text_lower)
-    if matched >= 2:
-        return True
-    return False
+    return matched >= 2
 
-# -------- MUTE FUNKSIYASI --------
+# -------- MUTE --------
 
 async def mute_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.message
@@ -137,24 +135,45 @@ async def mute_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 # -------- AI CHAT (Gemini, suhbat xotirali) --------
 
-chat_sessions = {}  # chat_id -> gemini chat session
-
-def get_chat_session(chat_id: int):
-    if chat_id not in chat_sessions:
-        chat_sessions[chat_id] = gemini_model.start_chat(history=[])
-    return chat_sessions[chat_id]
+# chat_id -> [ {role, parts} ]
+chat_histories: dict[int, list] = {}
 
 async def ai_reply(update: Update, text: str) -> None:
     chat_id = update.message.chat.id
-    session = get_chat_session(chat_id)
+
+    if chat_id not in chat_histories:
+        chat_histories[chat_id] = []
+
+    chat_histories[chat_id].append(
+        types.Content(role="user", parts=[types.Part(text=text)])
+    )
+
+    # Oxirgi 20 xabarni saqla
+    if len(chat_histories[chat_id]) > 20:
+        chat_histories[chat_id] = chat_histories[chat_id][-20:]
+
     try:
-        response = await asyncio.to_thread(session.send_message, text)
-        await update.message.reply_text(response.text.strip())
+        response = await asyncio.to_thread(
+            gemini_client.models.generate_content,
+            model=GEMINI_MODEL,
+            contents=chat_histories[chat_id],
+            config=types.GenerateContentConfig(
+                system_instruction=SYSTEM_PROMPT,
+                max_output_tokens=1000,
+            ),
+        )
+        reply = response.text.strip()
+
+        chat_histories[chat_id].append(
+            types.Content(role="model", parts=[types.Part(text=reply)])
+        )
+
+        await update.message.reply_text(reply)
     except Exception as e:
         logger.error(f"Gemini xatosi: {e}")
         await update.message.reply_text("Kechirasiz, hozir javob bera olmayapman.")
 
-# -------- XABARLARNI QAYTA ISHLASH --------
+# -------- HANDLERLAR --------
 
 async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.message
@@ -163,12 +182,10 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
 
     text = message.text
 
-    # Reklama bo'lsa — mute
     if is_advertisement(text):
         await mute_user(update, context)
         return
 
-    # Bot mention qilinsa — AI javob bersin
     bot_username = context.bot.username
     if f"@{bot_username}" in text:
         clean_text = text.replace(f"@{bot_username}", "").strip()
@@ -181,12 +198,10 @@ async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_T
         return
     await ai_reply(update, message.text.strip())
 
-# -------- START --------
-
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.message.chat.type == "private":
         await update.message.reply_text(
-            "Salom! Men AI assistentman (Gemini powered) 🤖\n"
+            "Salom! Men AI assistentman (Gemini 2.0 Flash) 🤖\n"
             "Istalgan savol yoki mavzu haqida yozing!"
         )
     else:
@@ -202,7 +217,6 @@ def main() -> None:
     app = Application.builder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start_command))
-
     app.add_handler(
         MessageHandler(
             filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE,
