@@ -1,227 +1,223 @@
-import logging
 import asyncio
-import re
+import logging
 import os
-from groq import Groq
-from telegram import Update
+import re
+from datetime import datetime, timedelta
+
+import google.generativeai as genai
+from telegram import Update, ChatPermissions
 from telegram.ext import (
-    ApplicationBuilder, MessageHandler, filters,
-    ContextTypes, CommandHandler
+    Application,
+    MessageHandler,
+    filters,
+    ContextTypes,
+    CommandHandler,
 )
-
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-
-AD_PATTERNS = [
-    r'https?://[^\s]+',
-    r't\.me/[^\s]+',
-    r'(\+998|998)\s*[\d\s\-]{9,}',
-    r'\b(click\.uz|payme|uzcard|humo)\b',
-]
 
 logging.basicConfig(
-    format="%(asctime)s | %(levelname)s | %(message)s",
-    level=logging.INFO
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO,
 )
-logger = logging.getLogger("AlphaModeratorBot")
+logger = logging.getLogger(__name__)
 
-groq_client = Groq(api_key=GROQ_API_KEY)
-MODEL = "llama-3.3-70b-versatile"
+# ===================== SOZLAMALAR =====================
+BOT_TOKEN = os.getenv("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "YOUR_GEMINI_KEY_HERE")
+MUTE_HOURS = 12
+NOTICE_DELETE_SECONDS = 5  # 0 = umuman chiqmasin
+# ======================================================
 
+genai.configure(api_key=GEMINI_API_KEY)
+gemini_model = genai.GenerativeModel(
+    model_name="gemini-1.5-flash",
+    system_instruction=(
+        "Siz guruh chatidagi foydali assistentsiz. "
+        "O'zbek, rus yoki ingliz tilida — savolning tiliga qarab javob bering. "
+        "Qisqa, aniq va do'stona bo'ling."
+    ),
+)
 
-async def groq_ask(prompt: str) -> str | None:
-    try:
-        response = await asyncio.to_thread(
-            groq_client.chat.completions.create,
-            model=MODEL,
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=512,
-            temperature=0.3,
-        )
-        return response.choices[0].message.content.strip()
-    except Exception as e:
-        logger.error(f"Groq xato: {e}")
-        return None
+# -------- REKLAMA ANIQLASH (AI siz, faqat regex + kalit so'zlar) --------
 
+AD_PATTERNS = [
+    r"https?://[^\s]+",
+    r"t\.me/[^\s]+",
+    r"wa\.me/[^\s]+",
+    r"@[a-zA-Z0-9_]{4,}",
+]
 
-async def ai_is_profanity(text: str) -> bool:
-    prompt = (
-        "Quyidagi xabar haqorat, so'kinish yoki kimnidir kamsitishni o'z ichiga oladimi?\n"
-        "Faqat 'ha' yoki 'yoq' deb javob ber, boshqa hech narsa yozma.\n\n"
-        f"Xabar: {text}"
-    )
-    result = await groq_ask(prompt)
-    return result is not None and result.lower().startswith("ha")
+AD_KEYWORDS = [
+    # O'zbek
+    "reklama", "sotamiz", "sotiladi", "arzon", "chegirma", "aksiya",
+    "daromad", "ishlang", "hamkor", "sherik", "obuna", "kanaliga",
+    "guruhga qo'shiling", "lotereya", "yutuq", "sovg'a", "tekin",
+    "pul ishlang", "investitsiya", "kripto", "bitcoin", "usdt", "nft",
+    "token", "pump", "signal", "kurs", "buyurtma", "ulgurji", "optom",
+    "dostavka", "yetkazib", "smm", "coaching", "biznes taklif",
+    # Rus
+    "продаю", "продам", "скидка", "акция", "заработок", "реклама",
+    "подписывайтесь", "переходите", "вступайте", "лотерея", "выигрыш",
+    "бесплатно", "инвестиции", "крипто", "сигналы", "канал", "группа",
+    # Ingliz
+    "buy now", "click here", "free money", "earn money", "investment",
+    "crypto", "bitcoin", "join now", "subscribe", "discount", "sale",
+    "promo", "offer", "limited", "exclusive",
+]
 
-
-async def ai_is_ad(text: str) -> bool:
-    prompt = (
-        "Quyidagi xabar reklama, spam, mahsulot/xizmat taklifi yoki boshqa kanalga taklif o'z ichiga oladimi?\n"
-        "Faqat 'ha' yoki 'yoq' deb javob ber, boshqa hech narsa yozma.\n\n"
-        f"Xabar: {text}"
-    )
-    result = await groq_ask(prompt)
-    return result is not None and result.lower().startswith("ha")
-
-
-async def ask_ai(question: str) -> str:
-    prompt = (
-        "Sen 'Alpha' ismli aqlli guruh assistentisan. "
-        "O'zbek tilida qisqa, aniq va foydali javob ber. "
-        "Markdown ishlatma, oddiy matn yoz.\n\n"
-        f"Savol: {question}"
-    )
-    result = await groq_ask(prompt)
-    return result or "Hozir javob bera olmayapman, keyinroq urinib ko'ring."
-
-
-def contains_ad_link(text: str, message) -> bool:
-    if message.forward_from_chat:
-        return True
+def is_advertisement(text: str) -> bool:
+    text_lower = text.lower()
     for pattern in AD_PATTERNS:
         if re.search(pattern, text, re.IGNORECASE):
             return True
+    matched = sum(1 for kw in AD_KEYWORDS if kw in text_lower)
+    if matched >= 2:
+        return True
     return False
 
+# -------- MUTE FUNKSIYASI --------
 
-def is_wake_word(text: str) -> bool:
-    return bool(re.search(r'\balpha\b', text, re.IGNORECASE))
+async def mute_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.message
+    if not message:
+        return
 
+    user = message.from_user
+    chat = message.chat
 
-async def warn_and_delete(context, chat_id, text):
     try:
-        sent = await context.bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML")
-        await asyncio.sleep(1)
-        await context.bot.delete_message(chat_id=chat_id, message_id=sent.message_id)
+        bot_member = await context.bot.get_chat_member(chat.id, context.bot.id)
+        if bot_member.status not in ("administrator", "creator"):
+            logger.warning("Bot admin emas.")
+            return
     except Exception as e:
-        logger.warning(f"warn_and_delete xato: {e}")
-
-
-async def moderate(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    message = update.message or update.edited_message
-    if not message or not message.from_user:
+        logger.error(f"Bot status xatosi: {e}")
         return
 
-    if message.chat.type not in ("group", "supergroup"):
-        return
-
-    is_admin = False
     try:
-        member = await context.bot.get_chat_member(message.chat_id, message.from_user.id)
-        if member.status in ("administrator", "creator"):
-            is_admin = True
+        user_member = await context.bot.get_chat_member(chat.id, user.id)
+        if user_member.status in ("administrator", "creator"):
+            return
     except Exception:
         pass
 
-    text = message.text or message.caption or ""
-    chat_id = message.chat_id
-    msg_id = message.message_id
-    user = message.from_user
-    user_mention = f"<a href='tg://user?id={user.id}'>{user.first_name}</a>"
+    try:
+        await message.delete()
+    except Exception as e:
+        logger.warning(f"Xabar o'chirish xatosi: {e}")
 
-    # Wake word "alpha"
-    if is_wake_word(text):
-        question = re.sub(r'\balpha\b', '', text, flags=re.IGNORECASE).strip(" ?,!:")
-        if not question:
-            question = "O'zingni tanit va nima qila olishingni ayt"
+    until_date = datetime.now() + timedelta(hours=MUTE_HOURS)
+    try:
+        await context.bot.restrict_chat_member(
+            chat_id=chat.id,
+            user_id=user.id,
+            permissions=ChatPermissions(
+                can_send_messages=False,
+                can_send_polls=False,
+                can_send_other_messages=False,
+                can_add_web_page_previews=False,
+            ),
+            until_date=until_date,
+        )
+        logger.info(f"{user.id} ({user.username}) {MUTE_HOURS} soatga mute qilindi.")
+    except Exception as e:
+        logger.error(f"Mute xatosi: {e}")
+        return
 
-        async def keep_typing():
-            for _ in range(15):
-                try:
-                    await context.bot.send_chat_action(chat_id=chat_id, action="typing")
-                except Exception:
-                    break
-                await asyncio.sleep(4)
-
-        typing_task = asyncio.create_task(keep_typing())
-        answer = await ask_ai(question)
-        typing_task.cancel()
-
+    if NOTICE_DELETE_SECONDS > 0:
+        mention = f"@{user.username}" if user.username else user.first_name
         try:
-            await context.bot.send_message(
-                chat_id=chat_id,
-                text=f"🤖 <b>Alpha:</b>\n{answer}",
-                parse_mode="HTML"
+            notice = await context.bot.send_message(
+                chat_id=chat.id,
+                text=f"🔇 {mention} reklama tarqatgani uchun {MUTE_HOURS} soatga mute qilindi.",
             )
+            await asyncio.sleep(NOTICE_DELETE_SECONDS)
+            await notice.delete()
         except Exception as e:
-            logger.warning(f"Alpha javob yuborishda xato: {e}")
+            logger.warning(f"Bildirishnoma xatosi: {e}")
+
+# -------- AI CHAT (Gemini, suhbat xotirali) --------
+
+chat_sessions = {}  # chat_id -> gemini chat session
+
+def get_chat_session(chat_id: int):
+    if chat_id not in chat_sessions:
+        chat_sessions[chat_id] = gemini_model.start_chat(history=[])
+    return chat_sessions[chat_id]
+
+async def ai_reply(update: Update, text: str) -> None:
+    chat_id = update.message.chat.id
+    session = get_chat_session(chat_id)
+    try:
+        response = await asyncio.to_thread(session.send_message, text)
+        await update.message.reply_text(response.text.strip())
+    except Exception as e:
+        logger.error(f"Gemini xatosi: {e}")
+        await update.message.reply_text("Kechirasiz, hozir javob bera olmayapman.")
+
+# -------- XABARLARNI QAYTA ISHLASH --------
+
+async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.message
+    if not message or not message.text:
         return
 
-    if is_admin:
+    text = message.text
+
+    # Reklama bo'lsa — mute
+    if is_advertisement(text):
+        await mute_user(update, context)
         return
 
-    if not text:
-        return
+    # Bot mention qilinsa — AI javob bersin
+    bot_username = context.bot.username
+    if f"@{bot_username}" in text:
+        clean_text = text.replace(f"@{bot_username}", "").strip()
+        if clean_text:
+            await ai_reply(update, clean_text)
 
-    # Tez link tekshiruvi
-    if contains_ad_link(text, message):
-        try:
-            await context.bot.delete_message(chat_id=chat_id, message_id=msg_id)
-        except Exception:
-            pass
-        asyncio.create_task(warn_and_delete(
-            context, chat_id,
-            f"🚫 {user_mention} — <b>Reklama aniqlandi!</b> Xabar o'chirildi."
-        ))
+async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.message
+    if not message or not message.text:
         return
+    await ai_reply(update, message.text.strip())
 
-    # AI paralel tekshiruvi
-    is_prof, is_ad = await asyncio.gather(
-        ai_is_profanity(text),
-        ai_is_ad(text)
+# -------- START --------
+
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.message.chat.type == "private":
+        await update.message.reply_text(
+            "Salom! Men AI assistentman (Gemini powered) 🤖\n"
+            "Istalgan savol yoki mavzu haqida yozing!"
+        )
+    else:
+        await update.message.reply_text(
+            f"✅ Bot faol!\n"
+            f"• Reklama → avtomatik o'chiriladi + {MUTE_HOURS} soat mute\n"
+            f"• @{context.bot.username} orqali AI bilan gaplashing"
+        )
+
+# -------- MAIN --------
+
+def main() -> None:
+    app = Application.builder().token(BOT_TOKEN).build()
+
+    app.add_handler(CommandHandler("start", start_command))
+
+    app.add_handler(
+        MessageHandler(
+            filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE,
+            handle_private_message,
+        )
+    )
+    app.add_handler(
+        MessageHandler(
+            filters.TEXT & ~filters.COMMAND & filters.ChatType.GROUPS,
+            handle_group_message,
+        )
     )
 
-    if is_prof:
-        try:
-            await context.bot.delete_message(chat_id=chat_id, message_id=msg_id)
-            await context.bot.ban_chat_member(chat_id=chat_id, user_id=user.id)
-        except Exception as e:
-            logger.warning(f"Ban/delete xato: {e}")
-        asyncio.create_task(warn_and_delete(
-            context, chat_id,
-            f"⛔️ {user_mention} — <b>Haqorat aniqlandi!</b> Ban qilindi."
-        ))
-        return
-
-    if is_ad:
-        try:
-            await context.bot.delete_message(chat_id=chat_id, message_id=msg_id)
-        except Exception:
-            pass
-        asyncio.create_task(warn_and_delete(
-            context, chat_id,
-            f"🚫 {user_mention} — <b>Reklama aniqlandi!</b> Xabar o'chirildi."
-        ))
-        return
-
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "🤖 <b>AlphaModeratorBot ishga tayyor!</b>\n\n"
-        "🛡️ <b>AI Moderatsiya:</b>\n"
-        "• Haqorat → o'chirish + ban\n"
-        "• Reklama → o'chirish\n\n"
-        "🧠 <b>AI Assistant:</b>\n"
-        "• <b>alpha</b> + savol → AI javob beradi\n"
-        "• Misol: <i>alpha Python nima?</i>",
-        parse_mode="HTML"
-    )
-
-
-def main():
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(
-        (filters.TEXT | filters.CAPTION) & ~filters.COMMAND,
-        moderate
-    ))
-    app.add_handler(MessageHandler(
-        filters.UpdateType.EDITED_MESSAGE & (filters.TEXT | filters.CAPTION),
-        moderate
-    ))
-    logger.info("🚀 AlphaModeratorBot ishga tushdi...")
-    app.run_polling(drop_pending_updates=True)
-
+    logger.info("Bot ishga tushdi ✅")
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
     main()
